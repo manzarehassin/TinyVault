@@ -1,6 +1,6 @@
 # TinyVault
 
-**TinyVault** is a ultra-secure, memory-safe, power-optimized SPI slave vault firmware built specifically for the **Microchip ATtiny13A** microcontroller. It turns the ATtiny13A into an encrypted/protected peripheral offering software-controlled read/write memory blocks (SRAM & EEPROM), hardware/software Write Protect (WP) mechanisms, multi-mode GPIO sampling (Debounce, Toggle, ADC), and deep power management enabling up to 10+ years of operation on a single CR2032 coin cell.
+**TinyVault** is an ultra-secure, memory-safe, power-optimized SPI slave vault firmware built specifically for the **Microchip ATtiny13A** microcontroller. It turns the ATtiny13A into an encrypted/protected peripheral offering software-controlled read/write memory blocks (SRAM & EEPROM), hardware/software Write Protect (WP) mechanisms, multi-mode GPIO sampling (Debounce, Toggle, ADC), and deep power management enabling up to 10+ years of operation on a single CR2032 coin cell.
 
 ---
 
@@ -9,7 +9,7 @@
 | Parameter | Specification |
 | :--- | :--- |
 | **Microcontroller** | ATtiny13A (AVR 8-bit) |
-| **Clock Speed** | 1.2 MHz (Internal RC Oscillator, `F_CPU = 1200000UL` default) |
+| **Clock Speed** | 9.6 MHz (Internal RC Oscillator, `F_CPU = 9600000UL`, CKDIV8 disabled) |
 | **Flash Memory** | 1,024 Bytes (1 KB) |
 | **SRAM Memory** | 64 Bytes total (34 Bytes User RAM + 4 Bytes Control Registers) |
 | **EEPROM Memory** | 64 Bytes |
@@ -177,27 +177,27 @@ SPI RX: [ 0xFF ] [ E[60] ] [ E[61] ] [ E[62] ] [ E[63] ] [ 0x00 ]
 ## Build & Flash Instructions
 
 ### Prerequisites
-- `avr-gcc` compiler toolchain
-- `avr-libc`
-- `avrdude` programming utility
-- Hardware programmer (e.g., USBasp, AVRISP mkII, or Arduino as ISP)
+* `avr-gcc` compiler toolchain
+* `avr-libc`
+* `avrdude` programming utility
+* Hardware programmer (e.g., USBasp, AVRISP mkII, or Arduino as ISP)
 
 ### Compilation Command
 
 ```bash
-avr-gcc -Wall -Os -DF_CPU=1200000UL -mmcu=attiny13a -c main.c -o main.o
+avr-gcc -Wall -Os -DF_CPU=9600000UL -mmcu=attiny13a -c main.c -o main.o
 avr-gcc -mmcu=attiny13a main.o -o main.elf
 avr-objcopy -O ihex -R .eeprom main.elf main.hex
 ```
 
 ### Fuse Bit Configuration
 
-To set the ATtiny13A to run at internal 1.2 MHz RC Oscillator:
-* **Low Fuse**: `0x6A`
+To set the ATtiny13A to run natively at the full **9.6 MHz Internal RC Oscillator** (disabling the default `CKDIV8` prescaler divider):
+* **Low Fuse**: `0x7A`
 * **High Fuse**: `0xFF`
 
 ```bash
-avrdude -c usbasp -p t13 -U lfuse:w:0x6A:m -U hfuse:w:0xFF:m -U flash:w:main.hex:i
+avrdude -c usbasp -p t13 -U lfuse:w:0x7A:m -U hfuse:w:0xFF:m -U flash:w:main.hex:i
 ```
 
 ---
