@@ -1,6 +1,6 @@
 # TinyVault
 
-**TinyVault** is an ultra-secure, memory-safe, power-optimized SPI slave vault firmware built specifically for the **Microchip ATtiny13A** microcontroller. It turns the ATtiny13A into an encrypted/protected peripheral offering software-controlled read/write memory blocks (SRAM & EEPROM), hardware/software Write Protect (WP) mechanisms, multi-mode GPIO sampling (Debounce, Toggle, ADC), and deep power management enabling up to 10+ years of operation on a single CR2032 coin cell.
+**TinyVault** is an ultra-secure, memory-safe, power-optimized SPI slave vault firmware built specifically for the **Microchip ATtiny13A** microcontroller. It turns the ATtiny13A into an encrypted/protected peripheral offering software-controlled read/write memory blocks (SRAM & EEPROM), hardware/software Write Protect (WP) mechanisms, multi-mode GPIO sampling (Debounce, Toggle, ADC), signal validation handshaking, and deep power management enabling up to 10+ years of operation on a single CR2032 coin cell.
 
 ---
 
@@ -16,6 +16,7 @@
 | **Operating Voltage** | 1.8V to 5.5V |
 | **Power Consumption** | ~0.2 µA – 2.0 µA (Deep Sleep) / ~4 µA – 6 µA (Debounce WDT Active) |
 | **Communication Protocol**| Bit-Banged SPI Slave Mode 0 (CPOL=0, CPHA=0) |
+| **Safe Master SCK Rate** | $\le 250 \text{ kHz}$ to $500 \text{ kHz}$ recommended (due to software-polled bit-banging overhead at 9.6 MHz core speed) |
 | **Package** | 8-pin PDIP / SOIC-8 |
 
 ---
@@ -35,9 +36,18 @@
 | :--- | :--- | :--- | :--- |
 | `P_MOSI` | `PB0` | Pin 5 | Master Out Slave In |
 | `P_MISO` | `PB1` | Pin 6 | Master In Slave Out (Tri-stated when `P_CS` is HIGH) |
-| `P_SCK`  | `PB2` | Pin 7 | SPI Serial Clock |
+| `P_SCK`  | `PB2` | Pin 7 | SPI Serial Clock (Polled synchronously by software) |
 | `P_CS`   | `PB3` | Pin 8 | SPI Chip Select (Active LOW, PCINT3 Interrupt Source) |
 | `P_WP`   | `PB4` | Pin 2 | Hardware Write-Protect Input / Digital Sensor / ADC Input |
+
+---
+
+## SPI Timing & Safe Master Clock Rate
+
+Because TinyVault implements **software bit-banging** for SPI slave communication instead of utilizing hardware SPI peripherals (the ATtiny13A lacks a dedicated hardware SPI module), the microcontroller must execute polling loops to detect rising and falling edges of the SCK clock line. 
+
+* **Operating Frequency Constraint:** With the core running at $9.6 \text{ MHz}$, each bit shift requires multiple CPU cycles to sample MOSI, transition MISO, and check for a Chip Select (`P_CS`) abort condition.
+* **Safe Master SCK Limit:** To prevent bit-misalignment, dropped clocks, or timing drift, the SPI Master should configure its clock rate to **$\le 250 \text{ kHz}$ to $500 \text{ kHz}$** (ensuring a minimum clock half-period of $\ge 2-4 \, \mu\text{s}$). Exceeding this frequency will cause communication desynchronization.
 
 ---
 
@@ -54,10 +64,11 @@
    - 8-bit command payload encoding Read/Write, Target Memory Space, and 6-bit Target Address.
    - Optional 5-Byte Page Burst Reads enabled via control bit `F_PAGE_RD`.
    - Automatic early CS-abort safety to clear line lockups.
-4. **GPIO Signal Conditioning & ADC**:
+4. **GPIO Signal Conditioning, Signature Bits & ADC**:
    - **Debouncing**: Watchdog Timer (WDT) background filtering requiring 5 consecutive stable ticks (~16 ms interval).
    - **Toggle Mode**: Latching edge detection on `P_WP` state transitions.
-   - **Analog-to-Digital Converter**: 10-bit ADC channel reading `PB4`, splitting output across control register (`FLAG1`) and internal RAM byte 33.
+   - **Signature & Signal Handshaking (`FLAG1`)**: Built-in signal configuration pattern bits (`0x38`) that automatically assert or clear the signal valid indicator status (`F_SIG_VAL`).
+   - **Analog-to-Digital Converter**: 10-bit ADC channel reading `PB4`, splitting output across control register `FLAG1` (upper 2 bits) and `FLAG2` (lower 8 bits during active sampling).
 5. **Ultra-Low Power Optimization**:
    - Default boot into `SLEEP_MODE_PWR_DOWN`.
    - Power Reduction Register (`PRR`) disables Timer0; Analog Comparator (`ACSR`) and Brown-Out Detector (`MCUCR`) disabled during sleep.
@@ -80,10 +91,9 @@ Bit 5..0: Address        (0 to 63 / 0x00 to 0x3F)
 | Address Range | Space | Description |
 | :--- | :--- | :--- |
 | `0x00` – `0x21` (0–33) | RAM | Volatile Storage Area (User RAM Array) |
-| `0x21` (33) | RAM | ADC Low-Byte mirror when `F_ADC_RD` is active |
 | `0x22` (34) | Control | **`ADDR_FLAG0`** (System Configuration Register) |
-| `0x23` (35) | Control | **`ADDR_FLAG1`** (Signal & Peripheral Status Register) |
-| `0x24` (36) | Control | **`ADDR_FLAG2`** (EEPROM Write Status & Result Flag) |
+| `0x23` (35) | Control | **`ADDR_FLAG1`** (Signal, Signature & Peripheral Status Register) |
+| `0x24` (36) | Control | **`ADDR_FLAG2`** (EEPROM Write Status / *Multiplexed with lower 8 bits of ADC when `F_ADC_RD` is active and sleep is off*) |
 | `0x25` (37) | Control | **`ADDR_RAM_CLEAR`** (Mass RAM Wipe Trigger) |
 | `0x00` – `0x3F` (0–63) | EEPROM | Non-volatile Data Memory Space |
 
@@ -106,27 +116,29 @@ Bit 5..0: Address        (0 to 63 / 0x00 to 0x3F)
 | **1** | `F_ADC_RD` | `1` = Enable 10-bit ADC Sampling on `PB4`; `0` = Digital Input Mode |
 | **0** | `F_DEBOUNCE`| `1` = Enable Watchdog Timer background filtering (requires `F_SLEEP=0`, `F_WP_MODE=1`) |
 
-### `ADDR_FLAG1` (Address 35 / 0x23) — Signal & Digital Status Register
+### `ADDR_FLAG1` (Address 35 / 0x23) — Signal, Signature & Digital Status Register
 
 | Bit | Name | Description |
 | :---: | :--- | :--- |
 | **7** | `F_TOGGLE` | `1` = Enable latching toggle mode on input; `0` = Momentary state |
-| **6** | `F_SIG_VAL` | Mirror of current signal detection state |
-| **5..3** | *Reserved*| User-written pattern bits (echoed back) |
+| **6** | `F_SIG_VAL` | **Signal Valid Status Indicator**: Automatically set (`1`) if signature bits (bits 5..3) are non-zero; cleared (`0`) otherwise. |
+| **5..3** | *Signature Bits* | User-configurable signal/signature pattern bits (`0x38` mask). Used for external peripheral signature verification and handshaking. |
 | **2** | `F_DIG_VAL` | Evaluated debounced/toggled digital reading of pin `P_WP` (`1` = HIGH, `0` = LOW) |
 | **1..0**| `F_ADC_HI` | High 2 bits of 10-bit ADC result (Bits 9..8) |
 
-### `ADDR_FLAG2` (Address 36 / 0x24) — EEPROM Operation Status Register (Read-Only)
+### `ADDR_FLAG2` (Address 36 / 0x24) — EEPROM Status / ADC Result Register (Read-Only)
 
-Updated after every EEPROM write attempt:
-
-```
-Bit 7..6: Status Result Code
-          0x40 (0b01) = Write Success (Value changed & updated)
-          0x80 (0b10) = Write Skipped (Value identical, EEPROM endurance preserved)
-          0xC0 (0b11) = Write Blocked (Hardware WP active or F_ROM_RO set)
-Bit 5..0: Target EEPROM Address (0–63)
-```
+* **During Active ADC Sampling (`F_ADC_RD=1`, `F_SLEEP=0`):** 
+  * Holds the **lower 8 bits** of the 10-bit ADC conversion result. EEPROM verification telemetry is conditionally bypassed during active ADC sampling.
+* **During Normal / Sleep Operation:** 
+  * Updated after every EEPROM write attempt to provide telemetry:
+  ```
+  Bit 7..6: Status Result Code
+            0x40 (0b01) = Write Success (Value changed & updated)
+            0x80 (0b10) = Write Skipped (Value identical, EEPROM endurance preserved)
+            0xC0 (0b11) = Write Blocked (Hardware WP active or F_ROM_RO set)
+  Bit 5..0: Target EEPROM Address (0–63)
+  ```
 
 ### `ADDR_RAM_CLEAR` (Address 37 / 0x25) — Memory Purge Register
 
@@ -152,13 +164,12 @@ SPI TX: [ 0xC5 ] [ 0xAA ]
 SPI RX: [ 0xFF ] [ 0xFF ]
 ```
 
-### 3. Disable Sleep & Software Write Protection (`FLAG0`)
-* Objective: Clear `F_SLEEP` and `F_ROM_RO`, keep `F_PULLUP` enabled.
-* Value: `0x04` (`0b00000100`).
-* **Command Byte**: `0b10100010` (`0xA2`) — Write (`1`), Control Space (`0`), Address `34` (`0x22`).
+### 3. Configure Signature Bits & Handshaking (`FLAG1`)
+* Objective: Write signature pattern into bits 5..3 (e.g., `0x18` / binary `011000`) which automatically asserts `F_SIG_VAL` (bit 6).
+* **Command Byte**: `0b10100011` (`0xA3`) — Write (`1`), Control Space (`0`), Address `35` (`0x23`).
 
 ```
-SPI TX: [ 0xA2 ] [ 0x04 ]
+SPI TX: [ 0xA3 ] [ 0x58 ]
 SPI RX: [ 0xFF ] [ 0xFF ]
 ```
 
