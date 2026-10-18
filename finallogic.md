@@ -4,7 +4,7 @@
 **Clock Configuration:** 1.2 MHz nominal CPU clock (`CKDIV8` enabled, `F_CPU = 1200000UL`)  
 **Recommended Safe SPI Clock Speed:** $\le 300\text{ kHz}$ (Bit-banged or hardware master clock, maintaining at least a $4\times$ safety margin relative to the 1.2 MHz CPU clock to prevent timing drift under low-voltage CR2032 conditions).  
 **Power Profile:** Optimized for CR2032 coin cell safety down to 1.8V. Peripherals (ADC, Analog Comparator, Timer0) are permanently disabled by default for maximum power conservation.  
-**Version:** 4.4  
+**Version:** 4.5  
 
 ---
 
@@ -104,9 +104,10 @@ TinyVault utilizes a bit-banged SPI Mode 0 protocol featuring a precise **2-bit 
 2. **Deferred Execution Post-`CS`:** The actual physical EEPROM programming executes strictly **after** `CS` goes HIGH:
    * **Pre-Write Internal Read:** Inspects the target address. If the stored value already matches the payload, the physical write is skipped to prevent unnecessary wear (updating `FLAG1` write skip status). *Note: Internal reads never modify `FLAG2`.*
    * **Conditional Physical Write:** If values differ, the byte is written.
+   * **Write Cycle Delay & Hardware Polling (`EEPE` Guard):** Physical EEPROM writes require a self-timed programming cycle (~3–4 ms). The firmware explicitly polls the hardware `EEPE` bit (`while (EECR & (1 << EEPE));`) to block execution until the physical write is 100% complete. This delay guarantees the charge pump finishes writing before any sleep transition occurs.
    * **Post-Write Verification Read:** Verifies success, updating `FLAG1` verification state. *Note: Internal verification reads never modify `FLAG2`.*
    * **Cleanup:** Once completed, `FLAG2` is cleared (`0x00`), and `FLAG0.bit0` is reset to `0`.
-3. **Power-Fail Battery Safety:** Without a dedicated power monitor pin, if power drops during or right after a session, any pending write executes using available battery/decoupling power before entering deep sleep.
+3. **Power-Fail Battery Safety:** Without a dedicated power monitor pin, if power drops during or right after a session, any pending write executes completely (enforced by the `EEPE` delay guard) using available battery/decoupling power before entering deep sleep.
 
 ---
 
@@ -130,4 +131,4 @@ The freed GPIO pin (`PB3`) functions as a flexible hybrid input governed by `FLA
 
 * **Busy Rejection (`0xAA` Error Code):** If the slave is busy (`FLAG0.bit7 == 1`), any incoming request immediately shifts out `10101010` (`0xAA`) and aborts the transaction.
 * **Timing Mismatch & Framing Safeguards:** `CS` acts as the absolute hardware framing boundary. If clock pulses are missed, timing drifts, or bit desynchronization occurs, pulling `CS` HIGH instantly forces the slave's SPI state machine to abort, clear internal bit counters, and discard corrupted shift-register data.
-* **Automatic Sleep Routine:** The moment `CS` goes HIGH, the slave checks for pending jobs (`FLAG0.bit0 == 1`). If no jobs are pending and `FLAG0.bit4` is `0`, the ATtiny13A automatically executes its deep power-down sleep instruction (`sleep_cpu()`), dropping current draw to micro-amps to protect the CR2032 coin cell.
+* **Automatic Sleep Routine:** The moment `CS` goes HIGH, the slave checks for pending jobs (`FLAG0.bit0 == 1`). If a job is pending, it completes the deferred write, enforced by the blocking `EEPE` completion delay. Once all jobs are cleared (`FLAG0.bit0 == 0`) and `FLAG0.bit4` is `0`, the ATtiny13A automatically executes its deep power-down sleep instruction (`sleep_cpu()`), dropping current draw to micro-amps to protect the CR2032 coin cell.
