@@ -1,6 +1,6 @@
 # TinyVault
 
-**TinyVault** is an ultra-secure, memory-safe, power-optimized SPI slave vault firmware built specifically for the **Microchip ATtiny13A** microcontroller. It turns the ATtiny13A into an encrypted/protected peripheral offering software-controlled read/write memory blocks (SRAM & EEPROM), hardware/software Write Protect (WP) mechanisms, multi-mode GPIO sampling (Debounce, Toggle, ADC), signal validation handshaking, and deep power management enabling up to 10+ years of operation on a single CR2032 coin cell.
+**TinyVault** is an ultra-secure, power-optimized, memory-safe bit-banged SPI slave vault firmware engineered for the **Microchip ATtiny13A** microcontroller. It provides an isolated memory architecture with hardware-assisted sleep control, software write protection, deferred EEPROM persistence, dual-mode GPIO/ADC sampling, and strict register-level access control.
 
 ---
 
@@ -8,211 +8,161 @@
 
 | Parameter | Specification |
 | :--- | :--- |
-| **Microcontroller** | ATtiny13A (AVR 8-bit) |
-| **Clock Speed** | 9.6 MHz (Internal RC Oscillator, `F_CPU = 9600000UL`, CKDIV8 disabled) |
-| **Flash Memory** | 1,024 Bytes (1 KB) |
-| **SRAM Memory** | 64 Bytes total (34 Bytes User RAM + 4 Bytes Control Registers) |
-| **EEPROM Memory** | 64 Bytes |
-| **Operating Voltage** | 1.8V to 5.5V |
-| **Power Consumption** | ~0.2 µA – 2.0 µA (Deep Sleep) / ~4 µA – 6 µA (Debounce WDT Active) |
-| **Communication Protocol**| Bit-Banged SPI Slave Mode 0 (CPOL=0, CPHA=0) |
-| **Safe Master SCK Rate** | $\le 250 \text{ kHz}$ to $500 \text{ kHz}$ recommended (due to software-polled bit-banging overhead at 9.6 MHz core speed) |
-| **Package** | 8-pin PDIP / SOIC-8 |
+| **Target Microcontroller** | Microchip ATtiny13A (8-pin DIP/SOIC) |
+| **Clock Frequency (`F_CPU`)** | $1.2\text{ MHz}$ Internal RC Oscillator (`CKDIV8` disabled) |
+| **SPI Mode** | Bit-banged SPI Mode 0 (Slave mode) |
+| **User RAM Capacity** | 32 Bytes (`0x00` – `0x1F`) |
+| **User EEPROM Capacity** | 63 Bytes (`0x00` – `0x3E`) |
+| **Metadata Storage** | 1 Byte (`0x3F` / EEPROM Address 63) |
+| **Sleep Mode** | Power-Down Mode (`MCUCR` setup, awakened via Pin Change Interrupt `PCINT4`) |
 
 ---
 
 ## Pinout Mapping
 
-```
-                 +---\/---+
-  (PCINT5/RESET) PB5 | 1  8 | VCC
-   (P_WP)        PB4 | 2  7 | PB2 (P_SCK)
-   (P_CS)        PB3 | 3  6 | PB1 (P_MISO)
-                 GND | 4  5 | PB0 (P_MOSI)
-                 +--------+
-```
+The firmware directly controls Microchip ATtiny13A Port B I/O pins as follows:
 
-| Pin Name | Port Pin | Hardware Function | SPI / Peripheral Role |
-| :--- | :--- | :--- | :--- |
-| `P_MOSI` | `PB0` | Pin 5 | Master Out Slave In |
-| `P_MISO` | `PB1` | Pin 6 | Master In Slave Out (Tri-stated when `P_CS` is HIGH) |
-| `P_SCK`  | `PB2` | Pin 7 | SPI Serial Clock (Polled synchronously by software) |
-| `P_CS`   | `PB3` | Pin 8 | SPI Chip Select (Active LOW, PCINT3 Interrupt Source) |
-| `P_WP`   | `PB4` | Pin 2 | Hardware Write-Protect Input / Digital Sensor / ADC Input |
+| Pin Name | Physical Pin | Direction | Description |
+| :---: | :---: | :---: | :--- |
+| `PB0` (`PB_MOSI`) | Pin 5 | Input | SPI Master Out Slave In Line |
+| `PB1` (`PB_MISO`) | Pin 6 | Output | SPI Master In Slave Out Line |
+| `PB2` (`PB_SCK`) | Pin 7 | Input | SPI Serial Clock Input Line |
+| `PB3` (`PB_GPIO`) | Pin 2 | Input | Dual-mode Input (Digital Read or ADC Channel 3 / `ADC3`) |
+| `PB4` (`PB_CS`) | Pin 3 | Input | Chip Select Line (Active LOW) with internal pull-up & `PCINT4` wake-up |
+| `PB5` (`RESET`) | Pin 1 | Input | External Reset / Programming |
 
 ---
 
-## SPI Timing & Safe Master Clock Rate
+## Memory Map & Control Registers
 
-Because TinyVault implements **software bit-banging** for SPI slave communication instead of utilizing hardware SPI peripherals (the ATtiny13A lacks a dedicated hardware SPI module), the microcontroller must execute polling loops to detect rising and falling edges of the SCK clock line. 
+TinyVault implements a unified memory map combining volatile RAM, control/status registers, and non-volatile EEPROM.
 
-* **Operating Frequency Constraint:** With the core running at $9.6 \text{ MHz}$, each bit shift requires multiple CPU cycles to sample MOSI, transition MISO, and check for a Chip Select (`P_CS`) abort condition.
-* **Safe Master SCK Limit:** To prevent bit-misalignment, dropped clocks, or timing drift, the SPI Master should configure its clock rate to **$\le 250 \text{ kHz}$ to $500 \text{ kHz}$** (ensuring a minimum clock half-period of $\ge 2-4 \, \mu\text{s}$). Exceeding this frequency will cause communication desynchronization.
+### 1. RAM & Register Space (35 Direct Addresses)
+
+* **Addresses `0` – `31` (`0x00` – `0x1F`):** `user_ram[32]` — Volatile general-purpose memory.
+* **Address `32` (`0x20`):** `FLAG0` — Device Configuration & Status Register.
+* **Address `33` (`0x21`):** `FLAG1` — EEPROM Operations Status Register.
+* **Address `34` (`0x22`):** `FLAG2` — ADC Conversion / Digital Input Storage Register.
+
+#### Register Layouts
+
+##### `FLAG0` (Address 32 / `RAM_SIZE`) — Control & Configuration
+* **Bit 7 (`BUSY`):** System busy state (`1` = Busy executing background tasks).
+* **Bit 6 (`ROM_RO`):** User EEPROM Read-Only lock status bit (Synced with EEPROM metadata).
+* **Bit 5 (`RAM_RO`):** User RAM Read-Only write protection flag (`1` = RAM write-protected).
+* **Bit 4 (`ADC_CTRL`):** ADC Control (`1` = ADC active on `PB3`, `0` = Digital Input / Power-Down enabled).
+* **Bits 3–1 (`SIG`):** 3-bit user-configurable device signature flags.
+* **Bit 0 (`PENDING`):** Deferred EEPROM write pending flag (`1` = Staged payload waiting for `CS` HIGH transition).
+
+> **Write Protection for `FLAG0`:** Bits 7 and 0 are system-protected. Master writes via SPI can only modify bits 6 through 1 (`flag0 = (flag0 & 0x81) | (data & 0x7E)`). Modifying bits 6–5 triggers a metadata synchronization write to EEPROM address 63.
+
+##### `FLAG1` (Address 33 / `RAM_SIZE + 1`) — EEPROM Execution Status
+* **Bit 7 (`SKIP`):** Set to `1` if a physical write was skipped because the target EEPROM byte already matched the payload.
+* **Bit 6 (`VERIFY`):** Set to `1` if post-write verification succeeded.
+* **Bits 5–0 (`ADDR`):** Stored address of the last processed EEPROM operation (User range: 0–62).
+
+> **Access Restriction:** Direct SPI writes to `FLAG1` (Address 33) are **strictly blocked**.
+
+##### `FLAG2` (Address 34 / `RAM_SIZE + 2`) — Data Input Storage
+* **When ADC is Enabled (`FLAG0.bit4 == 1`):** Holds the 8-bit downsampled analog value from `PB3` (`(ADC_10bit + 2) >> 2`).
+* **When ADC is Disabled (`FLAG0.bit4 == 0`):** Holds the live digital input state of `PB3` (`0x01` if HIGH, `0x00` if LOW) if `DIGITAL_PIN_READ_ENABLE` is set to `1`.
+
+> **Access Restriction:** Direct SPI writes to `FLAG2` (Address 34) are **strictly blocked**.
 
 ---
 
-## Features
+### 2. EEPROM Space (64 Bytes)
 
-1. **Memory Isolation & Safety**:
-   - 34 Bytes of volatile SRAM (`0x00` – `0x21`).
-   - 64 Bytes of non-volatile EEPROM (`0x00` – `0x3F`).
-   - Strict out-of-bounds bounds checking; invalid accesses yield `0x00` on reads and drop writes safely.
-2. **Hardware & Software Protection**:
-   - **Hardware Write-Protect (`P_WP` / `PB4`)**: Active-low pin state blocks EEPROM modification when active.
-   - **Software Read-Only Flags**: Independent write-inhibit switches for EEPROM (`F_ROM_RO`) and SRAM (`F_RAM_RO`).
-3. **SPI Command Architecture**:
-   - 8-bit command payload encoding Read/Write, Target Memory Space, and 6-bit Target Address.
-   - Optional 5-Byte Page Burst Reads enabled via control bit `F_PAGE_RD`.
-   - Automatic early CS-abort safety to clear line lockups.
-4. **GPIO Signal Conditioning, Signature Bits & ADC**:
-   - **Debouncing**: Watchdog Timer (WDT) background filtering requiring 5 consecutive stable ticks (~16 ms interval).
-   - **Toggle Mode**: Latching edge detection on `P_WP` state transitions.
-   - **Signature & Signal Handshaking (`FLAG1`)**: Built-in signal configuration pattern bits (`0x38`) that automatically assert or clear the signal valid indicator status (`F_SIG_VAL`).
-   - **Analog-to-Digital Converter**: 10-bit ADC channel reading `PB4`, splitting output across control register `FLAG1` (upper 2 bits) and `FLAG2` (lower 8 bits during active sampling).
-5. **Ultra-Low Power Optimization**:
-   - Default boot into `SLEEP_MODE_PWR_DOWN`.
-   - Power Reduction Register (`PRR`) disables Timer0; Analog Comparator (`ACSR`) and Brown-Out Detector (`MCUCR`) disabled during sleep.
-   - Estimated battery lifetime > 10 years on a 220 mAh CR2032 cell in default sleep configuration.
+* **Addresses `0` – `62` (`0x00` – `0x3E`):** User non-volatile persistent storage.
+* **Address `63` (`0x3F`):** System Metadata Storage (Stores packed protection bits `RAM_RO` and `ROM_RO`).
 
 ---
 
-## Protocol & Memory Map
+## SPI Protocol Specification
 
-All SPI frames begin with an **8-Bit Command Byte**:
+TinyVault utilizes a bit-banged SPI Mode 0 interface ($\text{CPOL}=0, \text{CPHA}=0$). Transactions are bounded by `PB_CS` (PB4).
+
+### Frame Structure
+
+Every frame begins with an 8-bit Command Header byte:
+$$\text{Header Byte} = [\text{Opcode (2 bits)}] \;\vert\; [\text{Address / Modifier (6 bits)}]$$
 
 ```
-Bit 7: Write / Read Flag (1 = Write, 0 = Read)
-Bit 6: Space Selector    (1 = EEPROM, 0 = RAM / Control Flags)
-Bit 5..0: Address        (0 to 63 / 0x00 to 0x3F)
+ Bit:   7   6   5   4   3   2   1   0
+      +-------+-----------------------+
+      | OPCODE|     ADDRESS (0-63)    |
+      +-------+-----------------------+
 ```
 
-### Address Space Mapping
-
-| Address Range | Space | Description |
-| :--- | :--- | :--- |
-| `0x00` – `0x21` (0–33) | RAM | Volatile Storage Area (User RAM Array) |
-| `0x22` (34) | Control | **`ADDR_FLAG0`** (System Configuration Register) |
-| `0x23` (35) | Control | **`ADDR_FLAG1`** (Signal, Signature & Peripheral Status Register) |
-| `0x24` (36) | Control | **`ADDR_FLAG2`** (EEPROM Write Status / *Multiplexed with lower 8 bits of ADC when `F_ADC_RD` is active and sleep is off*) |
-| `0x25` (37) | Control | **`ADDR_RAM_CLEAR`** (Mass RAM Wipe Trigger) |
-| `0x00` – `0x3F` (0–63) | EEPROM | Non-volatile Data Memory Space |
-
----
-
-## Register Definitions
-
-### `ADDR_FLAG0` (Address 34 / 0x22) — System Control Register
-
-*Default Boot State: `0xA4` (`F_SLEEP=1`, `F_ROM_RO=1`, `F_PULLUP=1`)*
-
-| Bit | Name | Description |
+| Opcode (`bits 7-6`) | Operation Class | Command Frame Sequence |
 | :---: | :--- | :--- |
-| **7** | `F_SLEEP` | `1` = Enable Power-Down Sleep Mode; `0` = Disable Sleep (Run GPIO Handler) |
-| **6** | `F_PAGE_RD` | `1` = Enable 5-Byte Page Burst Read Mode; `0` = Single-Byte SPI Read Mode |
-| **5** | `F_ROM_RO` | `1` = Software Write Protect EEPROM (Read-Only); `0` = Writable |
-| **4** | `F_RAM_RO` | `1` = Software Write Protect SRAM (Read-Only); `0` = Writable |
-| **3** | `F_WP_MODE` | `1` = Treat `P_WP` pin as GPIO Input / Sensor; `0` = Treat `P_WP` as HW Write Protect |
-| **2** | `F_PULLUP` | `1` = Internal Pull-up active on `P_WP`; `0` = Pull-up disabled |
-| **1** | `F_ADC_RD` | `1` = Enable 10-bit ADC Sampling on `PB4`; `0` = Digital Input Mode |
-| **0** | `F_DEBOUNCE`| `1` = Enable Watchdog Timer background filtering (requires `F_SLEEP=0`, `F_WP_MODE=1`) |
+| `0b00` | **RAM / Register Read** | **MOSI:** `[00 | Addr]` $\rightarrow$ **MISO:** Returns `[Data Byte]` |
+| `0b01` | **RAM / Register Write** | **MOSI:** `[01 | Addr]` $\rightarrow$ `[Payload Byte]` |
+| `0b10` | **EEPROM Read** | **MOSI:** `[10 | Addr]` $\rightarrow$ **MISO:** Returns `[EEPROM Data]` |
+| `0b11` | **EEPROM Deferred Write** | **MOSI:** `[11 | Addr]` $\rightarrow$ `[Payload Byte]` |
 
-### `ADDR_FLAG1` (Address 35 / 0x23) — Signal, Signature & Digital Status Register
+### System Response & Busy Guards
 
-| Bit | Name | Description |
-| :---: | :--- | :--- |
-| **7** | `F_TOGGLE` | `1` = Enable latching toggle mode on input; `0` = Momentary state |
-| **6** | `F_SIG_VAL` | **Signal Valid Status Indicator**: Automatically set (`1`) if signature bits (bits 5..3) are non-zero; cleared (`0`) otherwise. |
-| **5..3** | *Signature Bits* | User-configurable signal/signature pattern bits (`0x38` mask). Used for external peripheral signature verification and handshaking. |
-| **2** | `F_DIG_VAL` | Evaluated debounced/toggled digital reading of pin `P_WP` (`1` = HIGH, `0` = LOW) |
-| **1..0**| `F_ADC_HI` | High 2 bits of 10-bit ADC result (Bits 9..8) |
-
-### `ADDR_FLAG2` (Address 36 / 0x24) — EEPROM Status / ADC Result Register (Read-Only)
-
-* **During Active ADC Sampling (`F_ADC_RD=1`, `F_SLEEP=0`):** 
-  * Holds the **lower 8 bits** of the 10-bit ADC conversion result. EEPROM verification telemetry is conditionally bypassed during active ADC sampling.
-* **During Normal / Sleep Operation:** 
-  * Updated after every EEPROM write attempt to provide telemetry:
-  ```
-  Bit 7..6: Status Result Code
-            0x40 (0b01) = Write Success (Value changed & updated)
-            0x80 (0b10) = Write Skipped (Value identical, EEPROM endurance preserved)
-            0xC0 (0b11) = Write Blocked (Hardware WP active or F_ROM_RO set)
-  Bit 5..0: Target EEPROM Address (0–63)
-  ```
-
-### `ADDR_RAM_CLEAR` (Address 37 / 0x25) — Memory Purge Register
-
-Writing value **`255` (`0xFF`)** to this register zeroes out all 34 bytes of user SRAM (`ram[0..33]`). Writing any other value has no effect.
+1. **Busy State Rejection:** If `FLAG0.bit7` is set (`BUSY`), any incoming transaction while `CS` is LOW continuously shifts out the error byte `0x80` over MISO.
+2. **Early Transfer Abort:** The bit-banged SPI transfer function (`spi_transfer_byte`) continuously monitors `PB_CS`. If `CS` transitions HIGH mid-byte, the function immediately aborts execution and returns `0x00`.
 
 ---
 
-## Sample SPI Command Flows
+## Key Firmware Logic & Safety Subsystems
 
-### 1. Read User RAM Byte at Address 10 (`0x0A`)
-* **Command Byte**: `0b00001010` (`0x0A`) — Read (`0`), RAM (`0`), Address `10`.
+### 1. Deferred EEPROM Write Cycle & Wear Leveling
+To avoid blocking SPI clock lines during long physical write operations (~3.4 ms per byte), TinyVault implements a deferred write mechanism:
+1. **In-Frame Staging:** When an EEPROM write command (`Opcode 11`) is received, the target address and data byte are saved into `pending_eeprom_addr` and `pending_eeprom_data`. `FLAG0.bit0` (`PENDING`) is set to `1`.
+2. **Post-Frame Execution:** When `CS` goes HIGH, `spi_management()` sets `FLAG0.bit7` (`BUSY`) and invokes `eeprom_write_handling()`.
+3. **Wear-Reduction Check:** Before writing, the existing byte is read from EEPROM.
+   * If existing data equals the payload, the write is skipped, `FLAG1.bit7` is set to `1`, and `FLAG1.bit6` is cleared.
+   * If data differs, physical programming is performed (`eeprom_write`), and a post-write verification read is performed to set or clear `FLAG1.bit6`.
+4. **Hardware Polling:** Physical write calls poll the hardware `EEPE` bit (`while (EECR & (1 << EEPE));`) to safeguard hardware charge pumps before clearing the `PENDING` and `BUSY` flags.
 
-```
-SPI TX: [ 0x0A ] [ 0x00 ]
-SPI RX: [ 0xFF ] [ DATA ]
-```
+### 2. EEPROM Metadata Persistence (`metadataRead` / `metadataWrite`)
+EEPROM Address 63 stores the hardware protection states for `RAM_RO` (`FLAG0.bit5`) and `ROM_RO` (`FLAG0.bit6`):
+* **Initialization:** `init_config()` executes `metadataRead()`, restoring bits 6 and 5 of `FLAG0` from EEPROM Address 63 bits 1 and 0 (`(buf << 5) & 0x60`).
+* **Write Sync:** Writing to `FLAG0` (Address 32) triggers `metadataWrite()`. If the new protection mask differs from EEPROM Address 63, the metadata is updated in non-volatile memory.
 
-### 2. Write EEPROM Byte at Address 5 (`0x05`) with Value `0xAA`
-* **Command Byte**: `0b11000101` (`0xC5`) — Write (`1`), EEPROM (`1`), Address `5`.
-
-```
-SPI TX: [ 0xC5 ] [ 0xAA ]
-SPI RX: [ 0xFF ] [ 0xFF ]
-```
-
-### 3. Configure Signature Bits & Handshaking (`FLAG1`)
-* Objective: Write signature pattern into bits 5..3 (e.g., `0x18` / binary `011000`) which automatically asserts `F_SIG_VAL` (bit 6).
-* **Command Byte**: `0b10100011` (`0xA3`) — Write (`1`), Control Space (`0`), Address `35` (`0x23`).
-
-```
-SPI TX: [ 0xA3 ] [ 0x58 ]
-SPI RX: [ 0xFF ] [ 0xFF ]
-```
-
-### 4. 5-Byte EEPROM Page Burst Read starting at Address 60 (`0x3C`)
-* Setup: Set bit `F_PAGE_RD` (bit 6 of `FLAG0`).
-* **Command Byte**: `0b01111100` (`0x7C`) — Read (`0`), EEPROM (`1`), Address `60`.
-
-```
-SPI TX: [ 0x7C ] [ 0x00 ] [ 0x00 ] [ 0x00 ] [ 0x00 ] [ 0x00 ]
-SPI RX: [ 0xFF ] [ E[60] ] [ E[61] ] [ E[62] ] [ E[63] ] [ 0x00 ]
-```
-*(Note: Address 64 exceeds the 64-byte boundary, so the 5th byte safely returns `0x00`).*
+### 3. Power-Down Sleep Engine & Interrupt Wake-Up
+* **Wake-Up Interrupt:** Pin change interrupt `PCINT0_vect` listens to `PB4` (`CS`). On a falling edge (CS going LOW), `GIMSK` masks off `PCIE` temporarily to process `spi_management()` in a synchronous, blocking context.
+* **Auto-Sleep Conditions:** Inside `main()`, the system checks conditions on every loop iteration:
+  $$\text{Sleep Allowed} \iff (\text{FLAG0.bit0} == 0) \land (\text{FLAG0.bit4} == 0)$$
+  If no EEPROM writes are pending (`PENDING == 0`) and the ADC is disabled (`ADC_CTRL == 0`), the MCU enters `MCUCR` Power-Down sleep via inline assembly (`__asm__ __volatile__("sleep" ::: "memory");`).
 
 ---
 
-## Build & Flash Instructions
+## Building and Flashing
 
-### Prerequisites
-* `avr-gcc` compiler toolchain
-* `avr-libc`
-* `avrdude` programming utility
-* Hardware programmer (e.g., USBasp, AVRISP mkII, or Arduino as ISP)
-
-### Compilation Command
+### Firmware Compilation (AVR-GCC)
+Compile the source file using `avr-gcc` targeted for `attiny13a`:
 
 ```bash
-avr-gcc -Wall -Os -DF_CPU=9600000UL -mmcu=attiny13a -c main.c -o main.o
-avr-gcc -mmcu=attiny13a main.o -o main.elf
-avr-objcopy -O ihex -R .eeprom main.elf main.hex
+avr-gcc -Wall -Os -DF_CPU=1200000UL -mmcu=attiny13a -o tinyVault.elf ATTINY_13A_tinyVault_firmware.ino
+avr-objcopy -O ihex -R .eeprom tinyVault.elf tinyVault.hex
 ```
 
-### Fuse Bit Configuration
-
-To set the ATtiny13A to run natively at the full **9.6 MHz Internal RC Oscillator** (disabling the default `CKDIV8` prescaler divider):
-* **Low Fuse**: `0x7A`
-* **High Fuse**: `0xFF`
+### Flashing via AVRDUDE
+Flash the `.hex` file using an ISP programmer (e.g., USBasp or Arduino as ISP):
 
 ```bash
-avrdude -c usbasp -p t13 -U lfuse:w:0x7A:m -U hfuse:w:0xFF:m -U flash:w:main.hex:i
+avrdude -c usbasp -p t13 -U flash:w:tinyVault.hex:i
+```
+
+#### Fuse Bit Configuration (1.2 MHz Internal RC)
+Ensure the fuses are set for the 9.6 MHz internal oscillator with `CKDIV8` enabled (resulting in 1.2 MHz CPU clock):
+* **Low Fuse:** `0x6A`
+* **High Fuse:** `0xFF`
+
+```bash
+avrdude -c usbasp -p t13 -U lfuse:w:0x6A:m -U hfuse:w:0xFF:m
 ```
 
 ---
 
 ## License
 
-This project is open-source under the MIT License.
+This project is licensed under the **MIT License**.
+
+Copyright (c) 2026 **Manzar-E-Hassin**  
+Source Repository: [https://github.com/manzarehassin/TinyVault](https://github.com/manzarehassin/TinyVault)
