@@ -92,7 +92,7 @@ class TinyVaultSlave
   }
 
   static uint8_t normalizeFlag0(uint8_t f) {if ((f & 0x28) != 0x20) f &= (uint8_t)~0x10;return f;}
-  static uint8_t metadata(uint8_t f) {return (uint8_t)(0xb0 | ((f >> 3) & 1) | ((f >> 6) & 2) | ((f >> 4) & 4));}
+  static uint8_t metadata(uint8_t f) {return (uint8_t) (0xC0 & f);}
   
   static uint8_t gpioSample()
   {
@@ -145,7 +145,8 @@ public:
       value = normalizeFlag0(second);
       // Never write unnecessary metadata. Do not acknowledge effective FLAG0
       // change if nonvolatile metadata persistence could not be verified.
-      if (eeWrite(63, metadata(value))) tv_flag0 = value;
+      eeWrite(63, metadata(value));
+	  tv_flag0 = value;
     }
     else if (first >= 0xc0 && first <= 0xfe) 
     {
@@ -178,7 +179,7 @@ public:
     tv_flag1 = 0x3f;  // no EEPROM write request yet
     tv_tx = 0xaa;
     uint8_t m = eeRead(63);
-    if ((m & 0xf8) == 0xb0) { tv_flag0 = (uint8_t)((((m >> 1)&1)<<7) | (((m >> 2)&1)<<6) | ((m&1)<<3));}
+	tv_flag0 = (tv_flag0 & ~0xC0) | (m & 0xC0);
     
     EEDR = 0; EEARL = 0; // SPI owns scratch AFTER boot EEPROM read
     tv_state = (PINB & _BV(PB4)) ? 0 : ARMED;
